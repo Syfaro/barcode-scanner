@@ -1,7 +1,10 @@
+use std::time::Duration;
+
 use enum_iterator::Sequence;
 use enumflags2::{bitflags, BitFlags};
 use futures::{FutureExt, StreamExt};
 use serde::{Deserialize, Serialize};
+use tokio::{io::AsyncReadExt, time::interval};
 use tokio_serial::SerialPortBuilderExt;
 use tokio_util::sync::CancellationToken;
 
@@ -196,15 +199,63 @@ pub(crate) async fn start_scanner(
     Ok(rx)
 }
 
-#[tracing::instrument(skip(token, tx, usage_page, usage_id))]
-async fn hid_scanner_keyboard(
-    token: CancellationToken,
-    tx: tokio::sync::mpsc::Sender<eyre::Result<String>>,
+macro_rules! send_value {
+    ($tx:expr, $value:expr) => {
+        // If we have no input, no processing is needed.
+        if $value.is_empty() {
+            continue;
+        }
+
+        // Ready to send, so take the entire value.
+        let final_value = std::mem::take(&mut $value);
+
+        if let Err(err) = $tx.send(Ok(final_value)).await {
+            tracing::error!("could not send barcode value: {err}");
+            break;
+        }
+    };
+}
+
+macro_rules! interval_input {
+    ($token:expr, $tx:expr, $buf:expr, $fut:expr, $handler:expr) => {
+        let mut value = String::new();
+
+        let mut interval = interval(Duration::from_millis(50));
+
+        loop {
+            tokio::select! {
+                _ = interval.tick() => {
+                    send_value!($tx, value);
+                }
+                _ = $tx.closed() => {
+                    tracing::info!("receiver closed, ending task");
+                    break;
+                }
+                _ = $token.cancelled() => {
+                    tracing::info!("task cancelled, ending");
+                    break;
+                }
+                res = $fut => {
+                    let data = res?;
+
+                    let handler = $handler;
+                    if handler(data, &mut value) {
+                        send_value!($tx, value);
+                    }
+
+                    interval.reset();
+                }
+            }
+        }
+    };
+}
+
+async fn get_hid_device(
     usage_page: u16,
     usage_id: u16,
     vendor_id: u16,
     product_id: u16,
-) -> eyre::Result<()> {
+) -> eyre::Result<async_hid::Device> {
     let device = async_hid::DeviceInfo::enumerate()
         .await?
         .filter(|device| {
@@ -222,65 +273,57 @@ async fn hid_scanner_keyboard(
         .open(async_hid::AccessMode::Read)
         .await?;
 
+    Ok(device)
+}
+
+#[tracing::instrument(skip(token, tx, usage_page, usage_id))]
+async fn hid_scanner_keyboard(
+    token: CancellationToken,
+    tx: tokio::sync::mpsc::Sender<eyre::Result<String>>,
+    usage_page: u16,
+    usage_id: u16,
+    vendor_id: u16,
+    product_id: u16,
+) -> eyre::Result<()> {
+    let device = get_hid_device(usage_page, usage_id, vendor_id, product_id).await?;
+
     let mut buf = [0u8; 8];
-    let mut inp = String::new();
 
-    let mut interval = tokio::time::interval(std::time::Duration::from_millis(50));
+    interval_input!(
+        token,
+        tx,
+        buf,
+        device.read_input_report(&mut buf),
+        |size, value: &mut String| {
+            tracing::trace!(size, buf = hex::encode(&buf[0..size]), "got input report");
 
-    loop {
-        tokio::select! {
-            _ = interval.tick() => {
-                // If we have no input, no processing is needed.
-                if inp.is_empty() { continue; }
+            let mod_keys =
+                BitFlags::<ModifierKeys>::from_bits(buf[0]).expect("impossible modifier key flags");
 
-                if let Err(err) = tx.send(Ok(inp.clone())).await {
-                    tracing::error!("could not send scanner value: {err}");
-                    break;
-                }
+            // Iterate through each potentially pressed key, combine with
+            // shifts, and append to the input buffer.
+            for key_byte in &buf[2..size] {
+                if *key_byte == 0x00 {
+                    continue;
+                };
 
-                // Clear the input after sending.
-                inp.clear();
+                let Some(key) = KEY_LOOKUP.get(key_byte) else {
+                    tracing::warn!(key_byte, "got unknown keycode");
+                    continue;
+                };
+
+                let key = if mod_keys.contains(ModifierKeys::ShiftLeft | ModifierKeys::ShiftRight) {
+                    key.to_ascii_uppercase()
+                } else {
+                    *key
+                };
+
+                value.push(key);
             }
-            _ = tx.closed() => {
-                tracing::info!("receiver closed, ending task");
-                break;
-            }
-            _ = token.cancelled() => {
-                tracing::info!("task cancelled, ending");
-                break;
-            }
-            input = device.read_input_report(&mut buf) => {
-                let size = input?;
 
-                tracing::trace!(size, buf = hex::encode(&buf[0..size]), "got input report");
-
-                let mod_keys = BitFlags::<ModifierKeys>::from_bits(buf[0]).expect("impossible modifier key flags");
-
-                // Iterate through each potentially pressed key, combine with
-                // shifts, and append to the input buffer.
-                for key_byte in &buf[2..size] {
-                    if *key_byte == 0x00 { continue };
-
-                    let Some(key) = KEY_LOOKUP.get(key_byte) else {
-                        tracing::warn!(key_byte, "got unknown keycode");
-                        continue;
-                    };
-
-                    let key = if mod_keys.contains(ModifierKeys::ShiftLeft | ModifierKeys::ShiftRight) {
-                        key.to_ascii_uppercase()
-                    } else {
-                        *key
-                    };
-
-                    inp.push(key);
-                }
-
-                // Reset interval to keep waiting for more keys before sending.
-                interval.reset();
-                tracing::trace!(current_input = inp, "finished processing input report");
-            }
+            false
         }
-    }
+    );
 
     Ok(())
 }
@@ -294,70 +337,40 @@ async fn hid_scanner_pos(
     vendor_id: u16,
     product_id: u16,
 ) -> eyre::Result<()> {
-    let device = async_hid::DeviceInfo::enumerate()
-        .await?
-        .filter(|device| {
-            futures::future::ready(device.matches(usage_page, usage_id, vendor_id, product_id))
-        })
-        .next()
-        .await
-        .ok_or_else(|| {
-            eyre::eyre!(
-                "could not find hid device {}:{}",
-                hex::encode(vendor_id.to_be_bytes()),
-                hex::encode(product_id.to_be_bytes())
-            )
-        })?
-        .open(async_hid::AccessMode::Read)
-        .await?;
+    let device = get_hid_device(usage_page, usage_id, vendor_id, product_id).await?;
 
     let mut buf = [0u8; 64];
-    let mut inp = Vec::<u8>::new();
 
-    loop {
-        tokio::select! {
-            _ = tx.closed() => {
-                tracing::info!("receiver closed, ending task");
-                break;
-            }
-            _ = token.cancelled() => {
-                tracing::info!("task cancelled, ending");
-                break;
-            }
-            input = device.read_input_report(&mut buf) => {
-                let _read_size = input?;
+    interval_input!(
+        token,
+        tx,
+        buf,
+        device.read_input_report(&mut buf),
+        |_, value: &mut String| {
+            let data_len = buf[0] as usize;
 
-                let data_len = buf[0] as usize;
-                tracing::trace!(data_len, buf = hex::encode(&buf[0..data_len + 1]), "got input report");
+            tracing::trace!(
+                data_len,
+                buf = hex::encode(&buf[0..data_len + 1]),
+                "got input report"
+            );
 
-                // On the first input report, we have length, a fixed 0x0215,
-                // then the relevant data. It should be skipped over, using the
-                // length of the data indicated in the packet, offset by the
-                // number of bytes we don't need to read.
-                let useful_bytes = if inp.is_empty() {
-                    &buf[3..=data_len]
-                } else {
-                    &buf[1..=data_len]
-                };
+            // On the first input report, we have length, a fixed 0x0215,
+            // then the relevant data. It should be skipped over, using the
+            // length of the data indicated in the packet, offset by the
+            // number of bytes we don't need to read.
+            let useful_bytes = if value.is_empty() {
+                &buf[3..=data_len]
+            } else {
+                &buf[1..=data_len]
+            };
 
-                inp.extend(useful_bytes);
+            let s = String::from_utf8_lossy(useful_bytes);
+            value.push_str(&s);
 
-                // Barcode scanners are often set to end data with a \r\n, but
-                // we can't really be certain it's the real end if the input
-                // report just happened to end there.
-                //
-                // TODO: Consider if this should also have an interval-based
-                // solution for determining the end.
-                if data_len != 63 {
-                    tracing::debug!(size = inp.len(), "packet finished");
-
-                    let s = String::from_utf8_lossy(&inp);
-                    tx.send(Ok(s.to_string())).await.unwrap();
-                    inp.clear();
-                }
-            }
+            data_len != 63
         }
-    }
+    );
 
     Ok(())
 }
@@ -372,47 +385,23 @@ async fn serial_scanner(
     let mut port = tokio_serial::new(path, baud_rate).open_native_async()?;
 
     let mut buf = [0u8; 4096];
-    let mut inp = String::new();
 
-    let mut interval = tokio::time::interval(std::time::Duration::from_millis(50));
-
-    loop {
-        tokio::select! {
-            _ = interval.tick() => {
-                // If we have no input, no processing is needed.
-                if inp.is_empty() { continue; }
-
-                if let Err(err) = tx.send(Ok(inp.clone())).await {
-                    tracing::error!("could not send scanner value: {err}");
-                    break;
-                }
-
-                // Clear the input after sending.
-                inp.clear();
+    interval_input!(
+        token,
+        tx,
+        buf,
+        port.read(&mut buf),
+        |size, value: &mut String| {
+            if size == 0 {
+                return false;
             }
-            _ = tx.closed() => {
-                tracing::info!("receiver closed, ending task");
-                break;
-            }
-            _ = token.cancelled() => {
-                tracing::info!("task cancelled, ending");
-                break;
-            }
-            input = tokio::io::AsyncReadExt::read(&mut port, &mut buf) => {
-                let size = input?;
 
-                if size == 0 { continue }
+            let s = String::from_utf8_lossy(&buf[0..size]);
+            value.push_str(&s);
 
-                let s = String::from_utf8_lossy(&buf[0..size]);
-                tracing::trace!("read data from port: {s}");
-
-                inp.push_str(&s);
-
-                // Reset interval to keep waiting for more keys before sending.
-                interval.reset();
-            }
+            false
         }
-    }
+    );
 
     Ok(())
 }
