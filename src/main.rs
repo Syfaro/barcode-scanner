@@ -1,4 +1,6 @@
+mod barcode_decoders;
 mod barcode_scanner;
+mod config;
 mod ui;
 
 fn main() {
@@ -8,6 +10,11 @@ fn main() {
         .init();
 
     tracing::info!("hello! :3");
+
+    // Safety: Environment variables aren't mutated, so this should be safe.
+    unsafe {
+        time::util::local_offset::set_soundness(time::util::local_offset::Soundness::Unsound)
+    };
 
     ui::show_ui().expect("could not display ui");
 }

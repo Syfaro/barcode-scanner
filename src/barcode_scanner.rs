@@ -1,5 +1,7 @@
+use enum_iterator::Sequence;
 use enumflags2::{bitflags, BitFlags};
 use futures::{FutureExt, StreamExt};
+use serde::{Deserialize, Serialize};
 use tokio_serial::SerialPortBuilderExt;
 use tokio_util::sync::CancellationToken;
 
@@ -57,13 +59,13 @@ enum ModifierKeys {
     GuiRight = 0b10000000,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub(crate) struct Device {
     pub(crate) name: String,
     pub(crate) device_type: DeviceType,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub(crate) enum DeviceType {
     Hid {
         usage_page: u16,
@@ -74,6 +76,22 @@ pub(crate) enum DeviceType {
     Serial {
         path: String,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Sequence, Serialize, Deserialize)]
+pub(crate) enum HidType {
+    #[default]
+    Keyboard,
+    Pos,
+}
+
+impl std::fmt::Display for HidType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Keyboard => write!(f, "Keyboard"),
+            Self::Pos => write!(f, "Point of Sale"),
+        }
+    }
 }
 
 pub(crate) async fn list_devices() -> eyre::Result<Vec<Device>> {
@@ -119,7 +137,8 @@ pub(crate) async fn start_scanner(
     token: CancellationToken,
     device_type: DeviceType,
     baud_rate: Option<u32>,
-) -> eyre::Result<tokio::sync::mpsc::Receiver<String>> {
+    hid_type: Option<HidType>,
+) -> eyre::Result<tokio::sync::mpsc::Receiver<eyre::Result<String>>> {
     let (tx, rx) = tokio::sync::mpsc::channel(1);
 
     eyre::ensure!(
@@ -138,14 +157,24 @@ pub(crate) async fn start_scanner(
         rt.block_on(async {
             let local = tokio::task::LocalSet::new();
 
+            let err_tx = tx.clone();
+
             let fut = match device_type {
                 DeviceType::Hid {
                     usage_page,
                     usage_id,
                     vendor_id,
                     product_id,
-                } => hid_scanner(token, tx, usage_page, usage_id, vendor_id, product_id)
-                    .boxed_local(),
+                } => match hid_type.unwrap_or_default() {
+                    HidType::Keyboard => {
+                        hid_scanner_keyboard(token, tx, usage_page, usage_id, vendor_id, product_id)
+                            .boxed_local()
+                    }
+                    HidType::Pos => {
+                        hid_scanner_pos(token, tx, usage_page, usage_id, vendor_id, product_id)
+                            .boxed_local()
+                    }
+                },
                 DeviceType::Serial { path } => serial_scanner(
                     token,
                     tx,
@@ -157,6 +186,9 @@ pub(crate) async fn start_scanner(
 
             if let Err(err) = local.run_until(fut).await {
                 tracing::error!("scanner encountered error: {err}");
+                if let Err(err) = err_tx.send(Err(err)).await {
+                    tracing::error!("could not send scanner error: {err}");
+                }
             }
         })
     });
@@ -165,9 +197,9 @@ pub(crate) async fn start_scanner(
 }
 
 #[tracing::instrument(skip(token, tx, usage_page, usage_id))]
-async fn hid_scanner(
+async fn hid_scanner_keyboard(
     token: CancellationToken,
-    tx: tokio::sync::mpsc::Sender<String>,
+    tx: tokio::sync::mpsc::Sender<eyre::Result<String>>,
     usage_page: u16,
     usage_id: u16,
     vendor_id: u16,
@@ -201,7 +233,7 @@ async fn hid_scanner(
                 // If we have no input, no processing is needed.
                 if inp.is_empty() { continue; }
 
-                if let Err(err) = tx.send(inp.clone()).await {
+                if let Err(err) = tx.send(Ok(inp.clone())).await {
                     tracing::error!("could not send scanner value: {err}");
                     break;
                 }
@@ -253,10 +285,87 @@ async fn hid_scanner(
     Ok(())
 }
 
+#[tracing::instrument(skip(token, tx, usage_page, usage_id))]
+async fn hid_scanner_pos(
+    token: CancellationToken,
+    tx: tokio::sync::mpsc::Sender<eyre::Result<String>>,
+    usage_page: u16,
+    usage_id: u16,
+    vendor_id: u16,
+    product_id: u16,
+) -> eyre::Result<()> {
+    let device = async_hid::DeviceInfo::enumerate()
+        .await?
+        .filter(|device| {
+            futures::future::ready(device.matches(usage_page, usage_id, vendor_id, product_id))
+        })
+        .next()
+        .await
+        .ok_or_else(|| {
+            eyre::eyre!(
+                "could not find hid device {}:{}",
+                hex::encode(vendor_id.to_be_bytes()),
+                hex::encode(product_id.to_be_bytes())
+            )
+        })?
+        .open(async_hid::AccessMode::Read)
+        .await?;
+
+    let mut buf = [0u8; 64];
+    let mut inp = Vec::<u8>::new();
+
+    loop {
+        tokio::select! {
+            _ = tx.closed() => {
+                tracing::info!("receiver closed, ending task");
+                break;
+            }
+            _ = token.cancelled() => {
+                tracing::info!("task cancelled, ending");
+                break;
+            }
+            input = device.read_input_report(&mut buf) => {
+                let _read_size = input?;
+
+                let data_len = buf[0] as usize;
+                tracing::trace!(data_len, buf = hex::encode(&buf[0..data_len + 1]), "got input report");
+
+                // On the first input report, we have length, a fixed 0x0215,
+                // then the relevant data. It should be skipped over, using the
+                // length of the data indicated in the packet, offset by the
+                // number of bytes we don't need to read.
+                let useful_bytes = if inp.is_empty() {
+                    &buf[3..=data_len]
+                } else {
+                    &buf[1..=data_len]
+                };
+
+                inp.extend(useful_bytes);
+
+                // Barcode scanners are often set to end data with a \r\n, but
+                // we can't really be certain it's the real end if the input
+                // report just happened to end there.
+                //
+                // TODO: Consider if this should also have an interval-based
+                // solution for determining the end.
+                if data_len != 63 {
+                    tracing::debug!(size = inp.len(), "packet finished");
+
+                    let s = String::from_utf8_lossy(&inp);
+                    tx.send(Ok(s.to_string())).await.unwrap();
+                    inp.clear();
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
 #[tracing::instrument(skip(token, tx))]
 async fn serial_scanner(
     token: CancellationToken,
-    tx: tokio::sync::mpsc::Sender<String>,
+    tx: tokio::sync::mpsc::Sender<eyre::Result<String>>,
     path: String,
     baud_rate: u32,
 ) -> eyre::Result<()> {
@@ -273,7 +382,7 @@ async fn serial_scanner(
                 // If we have no input, no processing is needed.
                 if inp.is_empty() { continue; }
 
-                if let Err(err) = tx.send(inp.clone()).await {
+                if let Err(err) = tx.send(Ok(inp.clone())).await {
                     tracing::error!("could not send scanner value: {err}");
                     break;
                 }
