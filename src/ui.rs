@@ -1,5 +1,6 @@
 use std::borrow::Cow;
 use std::ops::Not;
+use std::path::PathBuf;
 use std::{collections::VecDeque, fmt::Debug};
 
 use eframe::egui::{
@@ -153,7 +154,7 @@ impl Application {
             self.state.error = Some(("Config Error".into(), err.to_string()));
         }
         self.worker.perform(async move {
-            config_loader.save("settings.json").await.unwrap();
+            config_loader.save().await.unwrap();
             Action::Saved
         });
     }
@@ -388,10 +389,22 @@ pub(crate) fn show_ui() -> eyre::Result<()> {
         ..Default::default()
     };
 
+    let settings_path =
+        if let Some(project_dirs) = directories::ProjectDirs::from("net", "Syfaro", "Scanner") {
+            let data = project_dirs.data_dir();
+            std::fs::create_dir_all(data)?;
+            data.to_path_buf()
+        } else {
+            PathBuf::new()
+        }
+        .join("settings.json");
+
+    tracing::debug!(settings_path = %settings_path.display(), "got settings path");
+
     let config_loader = rt.block_on(async move {
-        ConfigLoader::read("settings.json")
+        ConfigLoader::read(settings_path.clone())
             .await
-            .unwrap_or_default()
+            .unwrap_or_else(|_| ConfigLoader::empty(settings_path))
     });
 
     // Load devices immediately.

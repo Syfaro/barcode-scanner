@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO vci_issuer (iss, name, website, canonical_iss, error)\n                VALUES ($1, $2, $3, $4, $5) ON CONFLICT (iss) DO UPDATE SET\n                    name = EXCLUDED.name,\n                    website = EXCLUDED.website,\n                    canonical_iss = EXCLUDED.canonical_iss,\n                    updated_at = CURRENT_TIMESTAMP,\n                    error = EXCLUDED.error\n                RETURNING id",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Int64"
+      }
+    ],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "6960f0637a4130bb2649ac3caa00d01ea966663b7a15e4ec765a5102b63cc72c"
+}

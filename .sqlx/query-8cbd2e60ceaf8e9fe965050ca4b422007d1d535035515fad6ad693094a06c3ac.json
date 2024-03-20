@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT data \"data: sqlx::types::Json<jsonwebtoken::jwk::Jwk>\" FROM vci_issuer_key WHERE key_id = $1",
+  "describe": {
+    "columns": [
+      {
+        "name": "data: sqlx::types::Json<jsonwebtoken::jwk::Jwk>",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "8cbd2e60ceaf8e9fe965050ca4b422007d1d535035515fad6ad693094a06c3ac"
+}

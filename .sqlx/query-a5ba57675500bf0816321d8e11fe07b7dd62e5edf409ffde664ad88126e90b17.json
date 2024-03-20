@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO vci_issuer_key (vci_issuer_id, key_id, data)\n                    VALUES ($1, $2, $3) ON CONFLICT (vci_issuer_id, key_id) DO UPDATE SET\n                        data = EXCLUDED.data",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "a5ba57675500bf0816321d8e11fe07b7dd62e5edf409ffde664ad88126e90b17"
+}

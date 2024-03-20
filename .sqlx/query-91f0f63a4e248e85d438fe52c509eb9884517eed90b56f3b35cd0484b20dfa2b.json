@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO expiring_cache (key, value, expires_at)\n                    VALUES ('cvx_codes', $1, date('now', '+1 day')) ON CONFLICT DO UPDATE SET\n                        value = EXCLUDED.value,\n                        expires_at = EXCLUDED.expires_at",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "91f0f63a4e248e85d438fe52c509eb9884517eed90b56f3b35cd0484b20dfa2b"
+}

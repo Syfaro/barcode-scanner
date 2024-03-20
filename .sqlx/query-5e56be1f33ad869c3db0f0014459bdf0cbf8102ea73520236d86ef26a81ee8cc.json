@@ -1,0 +1,32 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT error, updated_at, count(DISTINCT vci_issuer_key.id) key_count\n                FROM vci_issuer\n                LEFT JOIN vci_issuer_key ON vci_issuer_key.vci_issuer_id = vci_issuer.id\n                WHERE vci_issuer.iss = $1\n                GROUP BY vci_issuer.iss",
+  "describe": {
+    "columns": [
+      {
+        "name": "error",
+        "ordinal": 0,
+        "type_info": "Bool"
+      },
+      {
+        "name": "updated_at",
+        "ordinal": 1,
+        "type_info": "Datetime"
+      },
+      {
+        "name": "key_count",
+        "ordinal": 2,
+        "type_info": "Int64"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "5e56be1f33ad869c3db0f0014459bdf0cbf8102ea73520236d86ef26a81ee8cc"
+}

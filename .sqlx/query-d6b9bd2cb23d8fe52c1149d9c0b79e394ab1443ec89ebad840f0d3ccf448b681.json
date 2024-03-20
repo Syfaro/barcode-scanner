@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT iss, name, website, canonical_iss FROM vci_issuer WHERE iss = $1",
+  "describe": {
+    "columns": [
+      {
+        "name": "iss",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "name",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "website",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "canonical_iss",
+        "ordinal": 3,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      true
+    ]
+  },
+  "hash": "d6b9bd2cb23d8fe52c1149d9c0b79e394ab1443ec89ebad840f0d3ccf448b681"
+}

@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT value\n                FROM expiring_cache\n                WHERE key = 'cvx_codes' AND expires_at >= date('now')\n                ORDER BY expires_at DESC\n                LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "name": "value",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "ffa9082493eaf958344ccb0d9bacc21cc7226d730c13c7fc75926131e731789c"
+}

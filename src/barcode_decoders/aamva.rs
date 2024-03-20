@@ -62,7 +62,15 @@ impl BarcodeData for AamvaData {
             let mut text = format!("🎂 {birthday}");
 
             if let Ok(today) = now {
-                let elapsed_years = today.date().year() - birthday.year();
+                let (birthday_year, birthday_day) = birthday.to_ordinal_date();
+                let (today_year, today_day) = today.to_ordinal_date();
+
+                // If the birthday day is greater than today, then they haven't
+                // had that birthday yet and we need to subtract the current
+                // year from their age.
+                let year_modifier = if birthday_day > today_day { -1 } else { 0 };
+                let elapsed_years = today_year - birthday_year + year_modifier;
+
                 text.push_str(&format!(" ({elapsed_years})"));
             }
 

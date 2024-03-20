@@ -1,7 +1,7 @@
-use std::{fmt::Debug, sync::Arc};
+use std::{collections::HashSet, fmt::Debug, path::PathBuf, sync::Arc};
 
 use async_trait::async_trait;
-use eframe::egui::{ahash::HashSet, Ui};
+use eframe::egui::Ui;
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
@@ -54,10 +54,23 @@ impl BarcodeDecoders {
             .build()
             .unwrap();
 
-        let path = std::env::var("DATABASE_URL").unwrap();
-        let pool = sqlx::sqlite::SqlitePoolOptions::new()
-            .connect(&path)
-            .await?;
+        let database_path = if let Some(project_dirs) =
+            directories::ProjectDirs::from("net", "Syfaro", "Scanner")
+        {
+            let dir = project_dirs.cache_dir();
+            tokio::fs::create_dir_all(&dir).await?;
+            dir.to_path_buf()
+        } else {
+            PathBuf::new()
+        }
+        .join("cache.db");
+
+        tracing::debug!(database_path = %database_path.display(), "got path for database");
+
+        let opts = sqlx::sqlite::SqliteConnectOptions::new()
+            .filename(database_path)
+            .create_if_missing(true);
+        let pool = sqlx::sqlite::SqlitePool::connect_with(opts).await?;
 
         sqlx::migrate!().run(&pool).await?;
 

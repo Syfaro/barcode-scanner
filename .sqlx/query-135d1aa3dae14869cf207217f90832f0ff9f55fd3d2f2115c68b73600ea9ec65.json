@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO cvx_code (code, short_description, full_name, notes, vaccine_status, last_updated)\n                    VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT (code) DO UPDATE SET\n                        short_description = EXCLUDED.short_description,\n                        full_name = EXCLUDED.full_name,\n                        notes = EXCLUDED.notes,\n                        vaccine_status = EXCLUDED.vaccine_status,\n                        last_updated = EXCLUDED.last_updated",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 6
+    },
+    "nullable": []
+  },
+  "hash": "135d1aa3dae14869cf207217f90832f0ff9f55fd3d2f2115c68b73600ea9ec65"
+}
